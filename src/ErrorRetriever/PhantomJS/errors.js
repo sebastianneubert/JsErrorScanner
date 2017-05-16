@@ -8,6 +8,10 @@ if (system.args.length === 1) {
     page.address = system.args[1];
     page.resources = [];
 
+    if (system.args[2]) {
+        page.customHeaders = {'cookie': system.args[2]};
+    }
+
     page.onError = function (msg, trace) {
         var message = msg + ' ';
 

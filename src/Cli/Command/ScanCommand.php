@@ -3,17 +3,22 @@
 namespace whm\JsErrorScanner\Cli\Command;
 
 use GuzzleHttp\Client;
-use GuzzleHttp\Psr7\Uri;
+
 use Koalamon\Client\Reporter\Event;
 use Koalamon\Client\Reporter\KoalamonException;
 use Koalamon\Client\Reporter\Reporter;
+use Koalamon\CookieMakerHelper\CookieMaker;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Input\InputArgument;
 use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Input\InputOption;
 use Symfony\Component\Console\Output\OutputInterface;
-use Symfony\Component\Yaml\Yaml;
-use whm\JsErrorScanner\PhantomJS\ErrorRetriever;
+use whm\Html\Uri;
+use whm\JsErrorScanner\ErrorRetriever\ErrorRetriever;
+use whm\JsErrorScanner\ErrorRetriever\PhantomJS\PhantomErrorRetriever;
+use whm\JsErrorScanner\ErrorRetriever\Webdriver\ChromeErrorRetriever;
+use whm\JsErrorScanner\ErrorRetriever\Webdriver\SeleniumCrashException;
+
 
 class ScanCommand extends Command
 {
@@ -27,7 +32,12 @@ class ScanCommand extends Command
                 new InputOption('koalamon_system', 's', InputOption::VALUE_OPTIONAL, 'the koalamon system identifier', null),
                 new InputOption('koalamon_server', 'k', InputOption::VALUE_OPTIONAL, 'the koalamon server', null),
                 new InputOption('phantomjs_exec', 'j', InputOption::VALUE_OPTIONAL, 'the phantom js executable file', null),
+                new InputOption('selenium_server', 'u', InputOption::VALUE_OPTIONAL, 'the selenium server url, ', 'http://localhost'),
+                new InputOption('selenium_server_port', 'i', InputOption::VALUE_OPTIONAL, 'the selenium server port, ', 4444),
                 new InputOption('options', 'o', InputOption::VALUE_OPTIONAL, 'koalamon options', null),
+                new InputOption('component', 'c', InputOption::VALUE_OPTIONAL, 'koalamon component id', null),
+                new InputOption('login', 'l', InputOption::VALUE_OPTIONAL, 'login params', null),
+                new InputOption('errorLog', 'e', InputOption::VALUE_OPTIONAL, 'login params', '/var/log/jserrorscanner.log'),
             ))
             ->setDescription('Check an url for js errors.')
             ->setName('scan');
@@ -41,13 +51,32 @@ class ScanCommand extends Command
     {
         $output->writeln("\n  <info>Checking " . $input->getArgument('url') . "</info>\n");
 
-        if ($input->getOption('phantomjs_exec')) {
-            $errorRetriever = new ErrorRetriever($input->getOption('phantomjs_exec'));
+        $options = json_decode($input->getOption('options'), true);
+
+        if (!array_key_exists('browser', $options) || $options['browser'] === 'chrome') {
+            $errorRetriever = new ChromeErrorRetriever($input->getOption('selenium_server'), $input->getOption('selenium_server_port'));
         } else {
-            $errorRetriever = new ErrorRetriever();
+            $errorRetriever = new PhantomErrorRetriever($input->getOption('phantomjs_exec'));
         }
 
-        $errors = $errorRetriever->getErrors(new Uri($input->getArgument('url')));
+        /** @var ErrorRetriever $errorRetriever */
+
+        $uri = new Uri($input->getArgument('url'));
+
+        if ($input->getOption('login')) {
+            $cookies = new CookieMaker();
+            $cookies = $cookies->getCookies($input->getOption('login'));
+            $uri->addCookies($cookies);
+        }
+
+        try {
+            $errors = $errorRetriever->getErrors($uri);
+        } catch (SeleniumCrashException $e) {
+            $handle = fopen($input->getOption('errorLog'), 'a');
+            fputcsv($handle, [date('Y-m-d H:i:s'), (string)$uri, $e->getMessage()], ';');
+            $output->writeln("<error>" . $e->getMessage() . "\n</error>");
+            exit(1);
+        }
 
         $ignoredFiles = [];
         if ($input->getOption('options')) {
@@ -63,20 +92,18 @@ class ScanCommand extends Command
         }
 
         $errorFound = false;
-
         $status = Event::STATUS_FAILURE;
+        $errorMsg = "";
 
         if (count($errors) > 0) {
             $errorMsg = 'JavaScript errors (' . count($errors) . ') were found on ' . $input->getArgument('url') . '<ul>';
 
             foreach ($errors as $error) {
 
-                $start = strpos($error, 'file: ') + 6;
-                $fileName = substr($error, $start, strpos($error, 'line: ') - $start - 2);
-
                 $ignored = false;
+
                 foreach ($ignoredFiles as $ignoredFile) {
-                    if (preg_match('^' . $ignoredFile . '^', $fileName)) {
+                    if (preg_match('^' . $ignoredFile . '^', $error)) {
                         $ignored = true;
                     }
                 }
@@ -108,7 +135,7 @@ class ScanCommand extends Command
                 $system = str_replace('http://', '', $input->getArgument('url'));
             }
 
-            $event = new Event('JsErrorScanner_' . $input->getArgument('url'), $system, $status, 'JsErrorScanner', $errorMsg, count($errors));
+            $event = new Event('JsErrorScanner_' . $input->getOption('component'), $system, $status, 'JsErrorScanner', $errorMsg, count($errors), null, $input->getOption('component'));
 
             try {
                 $reporter->sendEvent($event);
